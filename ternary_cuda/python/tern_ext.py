@@ -20,26 +20,36 @@ import torch
 import torch.nn as nn
 from torch.utils.cpp_extension import load
 
+# VS 2019 Professional, MSVC 14.50.35717
+_vctools = r"C:\Program Files\Microsoft Visual Studio\18\Professional\VC\Tools\MSVC"
+
+_versions = os.listdir(_vctools)
+if _versions:
+    _cl_path = os.path.join(_vctools, _versions[0], "bin", "Hostx64", "x64")
+    os.environ["PATH"] = _cl_path + ";" + os.environ.get("PATH", "")
+
+# Add CUDA toolkit path
+_cuda_path = r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.2\bin"
+os.environ["PATH"] = _cuda_path + ";" + os.environ.get("PATH", "")
+
 # Path to the CUDA kernel files - adjust if running from a different directory
 _this_dir   = os.path.dirname(os.path.abspath(__file__))
 _kernel_cu  = os.path.join(_this_dir, "../src/tern_kernel.cu")
+_bind_cpp   = os.path.join(_this_dir, "../src/tern_ext_bind.cpp")
 _include    = os.path.join(_this_dir, "../include")
 
-# I tried inline compilation first but it's cleaner to load from files.
-# The load() call compiles to a .pyd on Windows (a .so on Linux).
-# It caches the result in /tmp (or %TEMP% on Windows) so it only
-# recompiles when the source file changes.
 print("Loading ternary CUDA extension (may take ~30s on first run)...")
 
 _ext = load(
     name="tern_cuda_ext",
-    sources=[_kernel_cu],
+    sources=[_kernel_cu, _bind_cpp],
     extra_include_paths=[_include],
     extra_cuda_cflags=[
-        "-arch=sm_86",          # RTX 3060
+        "-arch=sm_86",
         "--expt-relaxed-constexpr",
         "--use_fast_math",
     ],
+    extra_cflags=["/O2"],
     verbose=True,
 )
 

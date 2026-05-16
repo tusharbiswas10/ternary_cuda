@@ -181,38 +181,38 @@ __global__ void kernel_bitlinear_forward(
     __shared__ uint32_t smem_W[TILE_N];
 
     int32_t acc = 0;
+    float row_absmax = 0.0f;
     int num_words = (N + WEIGHTS_PER_WORD - 1) / WEIGHTS_PER_WORD;
 
     for (int word_idx = 0; word_idx < num_words; word_idx++) {
         int tile_col_start = word_idx * WEIGHTS_PER_WORD;
 
-        // ---- Phase A: absmax per row ----
-        if (threadIdx.x == 0) {
-            smem_absmax[threadIdx.y] = 0.0f;
-        }
-        __syncthreads();
-
+        // ---- Phase A+B combined: single read, compute absmax + quantize ----
         {
-            int col = tile_col_start + threadIdx.x;
-            int row = out_row;
-            if (row < M && col < N) {
-                float v = fabsf(__half2float(X[row * N + col]));
-                atomicMax((int*)&smem_absmax[threadIdx.y], __float_as_int(v));
-            }
-        }
-        __syncthreads();
+            int row    = out_row;
+            int col_lo = tile_col_start + threadIdx.x * 2;
+            int col_hi = col_lo + 1;
 
-        // ---- Phase B: quantize activations into smem_X ----
-        {
-            int col = tile_col_start + threadIdx.x;
-            int row = out_row;
-            int8_t qval = 0;
-            if (row < M && col < N) {
-                float act_scale = smem_absmax[threadIdx.y] / 127.0f + 1e-8f;
-                float x_f = __half2float(X[row * N + col]);
-                qval = (int8_t)fminf(fmaxf(x_f / act_scale, -127.0f), 127.0f);
+            float vals_x = (row < M && col_lo < N) ? __half2float(X[row * N + col_lo]) : 0.0f;
+            float vals_y = (row < M && col_hi < N) ? __half2float(X[row * N + col_hi]) : 0.0f;
+
+            float v = fmaxf(fabsf(vals_x), fabsf(vals_y));
+            v = fmaxf(v, __shfl_down_sync(0xffffffff, v, 8));
+            v = fmaxf(v, __shfl_down_sync(0xffffffff, v, 4));
+            v = fmaxf(v, __shfl_down_sync(0xffffffff, v, 2));
+            v = fmaxf(v, __shfl_down_sync(0xffffffff, v, 1));
+
+            if (threadIdx.x == 0) smem_absmax[threadIdx.y] = v;
+            __syncthreads();
+
+            float tile_absmax = smem_absmax[threadIdx.y];
+            if (tile_absmax > row_absmax) row_absmax = tile_absmax;
+
+            float act_scale = tile_absmax / 127.0f + 1e-8f;
+            if (threadIdx.x < TILE_N / 2) {
+                smem_X[threadIdx.y][threadIdx.x * 2]     = (int8_t)fminf(fmaxf(vals_x / act_scale, -127.0f), 127.0f);
+                smem_X[threadIdx.y][threadIdx.x * 2 + 1] = (int8_t)fminf(fmaxf(vals_y / act_scale, -127.0f), 127.0f);
             }
-            smem_X[threadIdx.y][threadIdx.x] = qval;
         }
 
         // ---- Phase C: load weight words into smem_W ----
@@ -227,10 +227,17 @@ __global__ void kernel_bitlinear_forward(
         // ---- Phase D: dot product from shared memory ----
         if (valid) {
             uint32_t word = smem_W[threadIdx.x];
+            int cols_in_tile = min(WEIGHTS_PER_WORD, N - tile_col_start);
 
+            if (cols_in_tile == WEIGHTS_PER_WORD) {
 #pragma unroll
-            for (int bit = 0; bit < WEIGHTS_PER_WORD; bit++) {
-                if (tile_col_start + bit < N) {
+                for (int bit = 0; bit < WEIGHTS_PER_WORD; bit++) {
+                    uint32_t code = (word >> (bit * 2)) & 0x3;
+                    int      w_q = (int)(code & 1) - (int)((code >> 1) & 1);
+                    acc += (int32_t)smem_X[threadIdx.y][bit] * w_q;
+                }
+            } else {
+                for (int bit = 0; bit < cols_in_tile; bit++) {
                     uint32_t code = (word >> (bit * 2)) & 0x3;
                     int      w_q = (int)(code & 1) - (int)((code >> 1) & 1);
                     acc += (int32_t)smem_X[threadIdx.y][bit] * w_q;
@@ -242,12 +249,6 @@ __global__ void kernel_bitlinear_forward(
 
     // ---- Dequantize and write output ----
     if (valid) {
-        float row_absmax = 0.0f;
-        const __half* x_row = X + out_row * N;
-        for (int c = 0; c < N; c++) {
-            float v = fabsf(__half2float(x_row[c]));
-            if (v > row_absmax) row_absmax = v;
-        }
         float act_scale = row_absmax / 127.0f + 1e-8f;
         float result = (float)acc * act_scale * W_scales[out_col];
         Y[out_row * K + out_col] = __float2half(result);
@@ -342,8 +343,6 @@ void launch_bitlinear_forward(
         (__half*)output,
         M, N, K
     );
-
-    CUDA_CHECK(cudaDeviceSynchronize());
 }
 
 

@@ -49,8 +49,6 @@ __global__ void kernel_fp16_matmul_naive(
 // Run one configuration and print results
 // ============================================================
 static void run_benchmark(int M, int N, int K, int warmup, int iters) {
-    printf("Config: M=%-4d N=%-4d K=%-4d | ", M, N, K);
-
     // --- Allocate and initialize ---
     __half*   d_X_half   = gpu_alloc<__half>(M * N);
     __half*   d_W_half   = gpu_alloc<__half>(K * N);
@@ -103,12 +101,25 @@ static void run_benchmark(int M, int N, int K, int warmup, int iters) {
     float fp16_weight_mb = (float)(K * N * 2) / 1e6f;
     float tern_weight_mb = (float)(K * num_words * 4) / 1e6f;
 
-    printf("FP16: %6.2f ms  |  Tern: %6.2f ms  |  Speedup: %.2fx  |  "
-           "Weight mem: FP16=%.1fMB Tern=%.1fMB (%.1fx smaller)\n",
+    // Calculate bandwidth efficiency (ternary reads X twice: absmax + quantize)
+    double bytes_moved = (double)(K * num_words * 4)
+                       + (double)(M * N * 2) * 2.0
+                       + (double)(M * K * 2);
+    double bw_used_gbs  = bytes_moved / (ms_tern / 1000.0) / 1e9;
+    double bw_peak_gbs  = 336.0;
+    double bw_efficiency = bw_used_gbs / bw_peak_gbs * 100.0;
+
+    printf("Config: M=%-4d N=%-4d K=%-4d | "
+           "FP16: %6.2f ms  |  Tern: %6.2f ms  |  "
+           "Speedup: %.2fx  |  BW: %.1f%%  |  "
+           "Weight mem: FP16=%.1fMB Tern=%.1fMB (%.1fx vs FP16, %.1fx vs FP32)\n",
+           M, N, K,
            ms_fp16, ms_tern,
            ms_fp16 / ms_tern,
+           bw_efficiency,
            fp16_weight_mb, tern_weight_mb,
-           fp16_weight_mb / tern_weight_mb);
+           fp16_weight_mb / tern_weight_mb,
+           fp16_weight_mb * 2.0f / tern_weight_mb);
 
     gpu_free(d_X_half); gpu_free(d_W_half); gpu_free(d_W_fp32);
     gpu_free(d_W_packed); gpu_free(d_W_scales); gpu_free(d_Y_tern); gpu_free(d_Y_fp16);
@@ -137,6 +148,15 @@ int main() {
     // The ternary kernel should shine at small batch sizes (M=1,4)
     // because the bottleneck there is loading weights, not compute.
     // At large M the advantage shrinks.
+
+    // Show the crossover point clearly
+    run_benchmark(  1, 2048, 1024, 3, 10);
+    run_benchmark(  4, 2048, 1024, 3, 10);
+    run_benchmark(  8, 2048, 1024, 3, 10);
+    run_benchmark( 16, 2048, 1024, 3, 10);
+    run_benchmark( 32, 2048, 1024, 3, 10);
+    run_benchmark( 64, 2048, 1024, 3, 10);
+    run_benchmark(128, 2048, 1024, 3, 10);
 
     printf("\n=== Benchmark done ===\n");
     return 0;

@@ -167,6 +167,7 @@ static void test_forward_pass(int M, int N, int K) {
     launch_quantize_weights(d_W_fp32, d_W_packed, d_W_scales, K, N);
 
     // Run ternary forward pass
+    CUDA_CHECK(cudaDeviceSynchronize());
     CudaTimer timer;
     timer.start();
     launch_bitlinear_forward(d_X_half, d_W_packed, d_W_scales, d_Y_half, M, N, K);
@@ -211,10 +212,10 @@ static void test_encoding_sanity() {
     // and manually verify the packed word
     int K = 1, N = 16;
     float h_weights[16] = {
-         0.9f,  0.1f, -0.8f,  0.0f,   // should be: +1, 0, -1, 0
-         0.6f, -0.7f,  0.5f, -0.4f,   // should be: +1, -1, +1, 0
-        -0.9f,  0.0f,  0.3f, -0.6f,   // should be: -1, 0, 0, -1
-         0.8f, -0.1f,  0.7f,  0.2f    // should be: +1, 0, +1, 0
+         0.9f,  0.1f, -0.8f,  0.0f,   // +1  0 -1  0
+         0.6f, -0.7f,  0.6f, -0.6f,   // +1 -1 +1 -1
+        -0.9f,  0.0f,  0.1f, -0.6f,   // -1  0  0 -1
+         0.8f, -0.1f,  0.7f,  0.2f    // +1  0 +1  0
     };
 
     float*    d_weights = gpu_alloc<float>(K * N);
@@ -240,7 +241,7 @@ static void test_encoding_sanity() {
         printf("%2d ", decoded);
     }
     printf("\n");
-    printf("  Expected:        +1  0 -1  0 +1 -1 +1  0 -1  0  0 -1 +1  0 +1  0\n");
+    printf("  Expected:        +1  0 -1  0 +1 -1 +1 -1 -1  0  0 -1 +1  0 +1  0\n");
 
     gpu_free(d_weights);
     gpu_free(d_packed);
@@ -276,6 +277,14 @@ int main() {
     // e.g. hidden_size=1024, ffn_size=4096
     // Skipping for now - add when basic tests pass
     test_forward_pass(32, 1024, 4096);
+
+    // Phi-2 FFN layer: hidden=2560, ffn=10240
+    test_forward_pass(1,  2560, 10240);
+    test_forward_pass(8,  2560, 10240);
+
+    // Qwen2-1.5B FFN: hidden=2048, ffn=5504
+    test_forward_pass(1,  2048, 5504);
+    test_forward_pass(16, 2048, 5504);
 
     printf("=== All tests done ===\n");
     return 0;
